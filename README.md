@@ -12,11 +12,12 @@ Paste this into an iCUE iframe widget:
 <iframe src="https://akihideshoto.github.io/iCue-Crypto/crypto-tracker.html"></iframe>
 ```
 
-That's it. Live prices and 24h sparkline charts for BTC, ETH, BNKR, and IRYS.
+That's it. Live prices and 24h sparkline charts for BTC, ETH, DEXT, and LTC.
 
 ## Features
 
 - **Live pricing** — updates every 30 seconds via CoinGecko API (free, no key needed)
+- **DEXScreener fallback** — tokens not on CoinGecko (or failed fetches) automatically fall back to DEXScreener's free API
 - **24h sparkline charts** — drawn with native canvas, no Chart.js dependency
 - **Zero external dependencies** — no Tailwind, no CDN fonts, no libraries to break
 - **Offline resilient** — caches last-known prices in localStorage; shows cached data if API is rate-limited instead of blank/error screens
@@ -31,14 +32,36 @@ Edit the `COINS` array at the top of the `<script>` section in `crypto-tracker.h
 const COINS = [
   { id: 'bitcoin',      symbol: 'BTC'  },
   { id: 'ethereum',     symbol: 'ETH'  },
-  { id: 'bankercoin-2', symbol: 'BNKR' },
-  { id: 'irys',         symbol: 'IRYS' },
+  { id: 'dextools',     symbol: 'DEXT',
+    dex: { chain: 'ethereum', address: '0xfB7B4564402E5500dB5bB6d63Ae671302777C75a' }
+  },
+  { id: 'litecoin',     symbol: 'LTC'  },
 ];
 ```
 
-Use [CoinGecko coin IDs](https://www.coingecko.com/) — search for your coin and grab the ID from the URL.
+### CoinGecko Tokens
 
-### Common IDs
+For tokens listed on CoinGecko, just set `id` to the CoinGecko ID (lowercase). Find IDs at [coingecko.com](https://www.coingecko.com/) — search for your coin and grab the ID from the URL.
+
+### DEX-Only Tokens
+
+For tokens only traded on decentralized exchanges, add a `dex` field with the chain and contract address from [DEXScreener](https://dexscreener.com/):
+
+```javascript
+// DEX-only token (no CoinGecko listing)
+{ id: null, symbol: 'MYTOKEN',
+  dex: { chain: 'solana', address: 'So1111...tokenAddress' }
+},
+
+// CoinGecko token with DEXScreener fallback (recommended for DeFi tokens)
+{ id: 'dextools', symbol: 'DEXT',
+  dex: { chain: 'ethereum', address: '0xfB7B4564402E5500dB...' }
+},
+```
+
+When `id` is `null`, it skips CoinGecko entirely and uses DEXScreener. When both `id` and `dex` are set, CoinGecko is tried first with DEXScreener as fallback.
+
+### Common CoinGecko IDs
 
 | Coin | CoinGecko ID |
 |------|-------------|
@@ -49,6 +72,8 @@ Use [CoinGecko coin IDs](https://www.coingecko.com/) — search for your coin an
 | Cardano | `cardano` |
 | Dogecoin | `dogecoin` |
 | XRP | `ripple` |
+| DexTools | `dextools` |
+| Litecoin | `litecoin` |
 
 ## Configuration
 

@@ -116,6 +116,14 @@
     user-select: none;
   }
   @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+  /* Source badge */
+  .coin-source {
+    font-size: 8px;
+    color: #52525b;
+    letter-spacing: 0.5px;
+    margin-top: 1px;
+  }
 </style>
 </head>
 <body>
@@ -129,12 +137,23 @@
 
 <script>
 // ═══════════════════════════════════════════════
-// CONFIG — Edit coins here (CoinGecko IDs)
+// CONFIG — Edit coins here
+// ═══════════════════════════════════════════════
+// Each coin needs:
+//   symbol  — display ticker (e.g. 'BTC')
+//   id      — CoinGecko ID (lowercase), OR set to null for DEX-only tokens
+//   dex     — (optional) DEXScreener fallback: { chain, address }
+//             Used when CoinGecko ID is null or CoinGecko fetch fails
+//
+// To find CoinGecko IDs: https://www.coingecko.com/en/coins/<name>
+// To find DEXScreener info: https://dexscreener.com/search?q=<symbol>
 // ═══════════════════════════════════════════════
 const COINS = [
   { id: 'bitcoin',      symbol: 'BTC'  },
   { id: 'ethereum',     symbol: 'ETH'  },
-  { id: 'DexTools',         symbol: 'DEXT' },
+  { id: 'dextools',     symbol: 'DEXT',
+    dex: { chain: 'ethereum', address: '0xfB7B4564402E5500dB5bB6d63Ae671302777C75a' }
+  },
   { id: 'litecoin',     symbol: 'LTC'  },
 ];
 
@@ -142,14 +161,15 @@ const PRICE_INTERVAL   = 30_000;   // Update prices every 30s
 const CHART_INTERVAL   = 300_000;  // Update charts every 5 min
 const RETRY_BASE_MS    = 5_000;    // Retry backoff base
 const MAX_RETRIES      = 3;
-const API = 'https://api.coingecko.com/api/v3';
+const GECKO_API = 'https://api.coingecko.com/api/v3';
+const DEXS_API  = 'https://api.dexscreener.com';
 
 // ═══════════════════════════════════════════════
 // STATE
 // ═══════════════════════════════════════════════
 const state = {
-  prices: {},      // { coinId: { price, change24h } }
-  charts: {},      // { coinId: [price, price, ...] }
+  prices: {},      // { coinSymbol: { price, change24h, source } }
+  charts: {},      // { coinSymbol: [price, price, ...] }
   lastGoodPrices: {},
   status: 'loading',
   lastUpdate: null,
@@ -184,7 +204,7 @@ function loadState() {
 }
 
 // ═══════════════════════════════════════════════
-// API
+// API HELPERS
 // ═══════════════════════════════════════════════
 async function fetchWithRetry(url, retries = 0) {
   try {
@@ -209,53 +229,156 @@ async function fetchWithRetry(url, retries = 0) {
   }
 }
 
-async function fetchPrices() {
-  const ids = COINS.map(c => c.id).join(',');
-  const url = `${API}/coins/markets?vs_currency=usd&ids=${ids}&order=market_cap_desc&per_page=100&page=1&sparkline=false&price_change_percentage=24h`;
+// ═══════════════════════════════════════════════
+// COINGECKO — batch price fetch for all coins with gecko IDs
+// ═══════════════════════════════════════════════
+async function fetchGeckoPrices() {
+  const geckoCoins = COINS.filter(c => c.id);
+  if (geckoCoins.length === 0) return;
+
+  const ids = geckoCoins.map(c => c.id).join(',');
+  const url = `${GECKO_API}/coins/markets?vs_currency=usd&ids=${ids}&order=market_cap_desc&per_page=100&page=1&sparkline=false&price_change_percentage=24h`;
 
   try {
     const data = await fetchWithRetry(url);
     data.forEach(coin => {
-      state.prices[coin.id] = {
+      // Find matching config entry by gecko ID
+      const cfg = geckoCoins.find(c => c.id === coin.id);
+      if (!cfg) return;
+      const key = cfg.symbol;
+      state.prices[key] = {
         price: coin.current_price,
         change24h: coin.price_change_percentage_24h || 0,
+        source: 'gecko',
       };
-      state.lastGoodPrices[coin.id] = state.prices[coin.id];
+      state.lastGoodPrices[key] = state.prices[key];
     });
+    return true;
+  } catch(e) {
+    console.warn('CoinGecko price fetch failed:', e.message);
+    return false;
+  }
+}
+
+// ═══════════════════════════════════════════════
+// DEXSCREENER — fallback for DEX-only tokens or gecko failures
+// ═══════════════════════════════════════════════
+async function fetchDexScreenerPrice(coin) {
+  if (!coin.dex) return false;
+
+  const url = `${DEXS_API}/tokens/v1/${coin.dex.chain}/${coin.dex.address}`;
+  try {
+    const data = await fetchWithRetry(url);
+    // API returns array of pairs — pick the one with highest liquidity
+    if (!Array.isArray(data) || data.length === 0) throw new Error('No pairs found');
+
+    const best = data.reduce((a, b) =>
+      (parseFloat(b.liquidity?.usd || 0) > parseFloat(a.liquidity?.usd || 0)) ? b : a
+    );
+
+    const key = coin.symbol;
+    state.prices[key] = {
+      price: parseFloat(best.priceUsd),
+      change24h: parseFloat(best.priceChange?.h24 || 0),
+      source: 'dexs',
+    };
+    state.lastGoodPrices[key] = state.prices[key];
+    return true;
+  } catch(e) {
+    console.warn(`DEXScreener fetch failed for ${coin.symbol}:`, e.message);
+    return false;
+  }
+}
+
+// ═══════════════════════════════════════════════
+// UNIFIED PRICE FETCH — gecko first, dexscreener fallback
+// ═══════════════════════════════════════════════
+async function fetchPrices() {
+  let anySuccess = false;
+
+  // 1. Batch fetch from CoinGecko
+  const geckoOk = await fetchGeckoPrices();
+  if (geckoOk) anySuccess = true;
+
+  // 2. For coins that have no gecko ID, or failed gecko fetch, try DEXScreener
+  for (const coin of COINS) {
+    const key = coin.symbol;
+    const needsDex = !coin.id || !state.prices[key] || state.prices[key].source !== 'gecko';
+    if (needsDex && coin.dex) {
+      await new Promise(r => setTimeout(r, 500)); // rate limit courtesy
+      const dexOk = await fetchDexScreenerPrice(coin);
+      if (dexOk) anySuccess = true;
+    }
+  }
+
+  if (anySuccess) {
     state.lastUpdate = Date.now();
     state.status = 'ok';
     state.errors = 0;
     saveState();
-  } catch(e) {
-    console.warn('Price fetch failed:', e.message);
+  } else {
     state.errors++;
-    // Fall back to last known prices
     if (Object.keys(state.lastGoodPrices).length > 0) {
-      state.prices = { ...state.lastGoodPrices };
+      Object.entries(state.lastGoodPrices).forEach(([k, v]) => {
+        if (!state.prices[k]) state.prices[k] = v;
+      });
       state.status = 'stale';
     } else {
       state.status = 'error';
     }
   }
+
   render();
+}
+
+// ═══════════════════════════════════════════════
+// CHART DATA
+// ═══════════════════════════════════════════════
+async function fetchGeckoChart(coin) {
+  if (!coin.id) return false;
+  try {
+    const url = `${GECKO_API}/coins/${coin.id}/market_chart?vs_currency=usd&days=1`;
+    const data = await fetchWithRetry(url);
+    if (data.prices && data.prices.length > 0) {
+      state.charts[coin.symbol] = data.prices.map(p => p[1]);
+      return true;
+    }
+  } catch(e) {
+    console.warn(`Gecko chart failed for ${coin.symbol}:`, e.message);
+  }
+  return false;
+}
+
+async function fetchDexScreenerChart(coin) {
+  // DEXScreener doesn't have a free chart/history API, so we accumulate points ourselves
+  // This builds a chart over time from periodic price fetches
+  const key = coin.symbol;
+  if (state.prices[key]) {
+    if (!state.charts[key]) state.charts[key] = [];
+    state.charts[key].push(state.prices[key].price);
+    // Keep last 288 points (~24h at 5min intervals)
+    if (state.charts[key].length > 288) {
+      state.charts[key] = state.charts[key].slice(-288);
+    }
+    saveState();
+    return true;
+  }
+  return false;
 }
 
 async function fetchCharts() {
   for (const coin of COINS) {
-    try {
-      // Small delay between requests
-      await new Promise(r => setTimeout(r, 1500));
-      const url = `${API}/coins/${coin.id}/market_chart?vs_currency=usd&days=1`;
-      const data = await fetchWithRetry(url);
-      if (data.prices && data.prices.length > 0) {
-        state.charts[coin.id] = data.prices.map(p => p[1]);
-        saveState();
-      }
-    } catch(e) {
-      console.warn(`Chart fetch failed for ${coin.id}:`, e.message);
-      // Keep existing chart data if available
+    await new Promise(r => setTimeout(r, 1500));
+
+    // Try CoinGecko chart first
+    const geckoOk = await fetchGeckoChart(coin);
+
+    // For DEX-only tokens (no gecko ID), accumulate from price data
+    if (!geckoOk && coin.dex) {
+      await fetchDexScreenerChart(coin);
     }
   }
+  saveState();
   render();
 }
 
@@ -326,18 +449,18 @@ function buildGrid() {
   const grid = document.getElementById('grid');
   grid.innerHTML = '';
 
-  COINS.forEach((coin, i) => {
+  COINS.forEach((coin) => {
     const card = document.createElement('div');
     card.className = 'coin-card';
-    card.id = `card-${coin.id}`;
+    card.id = `card-${coin.symbol}`;
     card.innerHTML = `
       <div class="coin-info">
         <div class="coin-symbol">${coin.symbol}</div>
-        <div class="coin-price loading" id="price-${coin.id}">$0,000.00</div>
-        <div class="coin-change" id="change-${coin.id}">--</div>
+        <div class="coin-price loading" id="price-${coin.symbol}">$0,000.00</div>
+        <div class="coin-change" id="change-${coin.symbol}">--</div>
       </div>
       <div class="sparkline-wrap">
-        <canvas id="chart-${coin.id}"></canvas>
+        <canvas id="chart-${coin.symbol}"></canvas>
       </div>
     `;
     grid.appendChild(card);
@@ -346,12 +469,13 @@ function buildGrid() {
 
 function render() {
   COINS.forEach(coin => {
-    const priceEl = document.getElementById(`price-${coin.id}`);
-    const changeEl = document.getElementById(`change-${coin.id}`);
-    const cardEl = document.getElementById(`card-${coin.id}`);
-    const canvasEl = document.getElementById(`chart-${coin.id}`);
+    const key = coin.symbol;
+    const priceEl = document.getElementById(`price-${key}`);
+    const changeEl = document.getElementById(`change-${key}`);
+    const cardEl = document.getElementById(`card-${key}`);
+    const canvasEl = document.getElementById(`chart-${key}`);
 
-    const data = state.prices[coin.id];
+    const data = state.prices[key];
     if (data) {
       priceEl.textContent = formatPrice(data.price);
       priceEl.classList.remove('loading');
@@ -364,7 +488,7 @@ function render() {
     }
 
     // Draw sparkline
-    const chartData = state.charts[coin.id];
+    const chartData = state.charts[key];
     if (chartData && chartData.length > 1) {
       const isUp = chartData[chartData.length - 1] >= chartData[0];
       drawSparkline(canvasEl, chartData, isUp);
@@ -398,7 +522,7 @@ async function init() {
     render();
   }
 
-  // Fetch fresh prices (single API call for all 4 coins)
+  // Fetch fresh prices
   await fetchPrices();
 
   // Fetch charts (sequential, with delays)
