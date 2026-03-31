@@ -9,7 +9,7 @@ A lightweight crypto price tracker widget for the **Corsair Xeneon Edge** touchs
 Paste this into an iCUE iframe widget:
 
 ```html
-<iframe src="https://cat-battle.github.io/xeneon-crypto/crypto-tracker.html"></iframe>
+<iframe src="https://https://github.com/AkihideShoto/iCue-Crypto.html"></iframe>
 ```
 
 That's it. Live prices and 24h sparkline charts for BTC, ETH, BNKR, and IRYS.
